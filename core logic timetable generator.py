@@ -1,4 +1,10 @@
 """
+line 2049 not running
+line 1050 not running
+line 1023 not running
+line 105 not running
+line 3457 not running
+
 ADVANCED Multi-Department Timetable Generator
 ✨ NEW FEATURES:
 - Floor-wise room assignment priority for same department batches
@@ -660,7 +666,7 @@ class AdvancedExcelReader:
                 
                 # Lab hours per semester
                 lab_hours_sem = self._get_column_value(row, df, 
-                    ['lab_hours', 'lab', 'lab hours per semester', 'practical_hours'], 0)
+                    ['lab_hours', 'lab', 'lab hours per semester','_lab-hours_per_semester' ,'lab_hours_per_semester','practical_hours'], 0)
                 try:
                     lab_hours_sem = int(lab_hours_sem)
                 except (ValueError, TypeError):
@@ -1676,7 +1682,7 @@ class ConstraintViolation:
 class SchedulingConfig:
     """Production-grade configuration"""
     MIN_THEORY: int = 1
-    MIN_LAB: int = 0
+    MIN_LAB: int = 1
     REDUCTION_STEP: float = 0.85
     MAX_ATTEMPTS: int = 12
     FEASIBILITY_BUFFER: float = 1.2
@@ -2281,107 +2287,6 @@ class EmergencyScheduler:
         return report
 
 
-# ============================================================================
-# USAGE IN process_department()
-# ============================================================================
-
-def process_department_optimized(input_file, output_dir):
-    import logging
-    """
-    Optimized process_department with emergency scheduling.
-    
-    This version:
-    - Pre-checks before expensive scheduling
-    - Scales intelligently from original values
-    - Maintains high code quality
-    - Includes comprehensive logging
-    """
-    department_name = Path(input_file).stem
-    
-    logger.info(f"\n{'='*70}")
-    logger.info(f"🔄 Processing: {department_name}")
-    logger.info(f"{'='*70}")
-    
-    try:
-        # Load data
-        predictor = StrategyPredictor()
-        reader = AdvancedExcelReader(input_file)
-        data = reader.parse_all()
-        
-        logger.info(f"✓ Loaded: {len(data['subjects'])} subjects, "
-                   f"{len(data['batches'])} batches, "
-                   f"{len(data['faculties'])} faculty")
-        
-        # Analyze resources
-        analyzer = ResourceAnalyzer(data)
-        analysis = analyzer.analyze_capacity()
-        
-        # Check for imbalance and rebalance
-        logger.info("🔍 Checking for hour imbalance...")
-        is_imbalanced, reason, ratio = analyzer._detect_hour_imbalance()
-        
-        if is_imbalanced:
-            logger.info(f"⚠️ Imbalance detected: {reason} ({ratio:.1%})")
-            data, report = analyzer.apply_intelligent_balancing('balanced')
-            logger.info(f"✅ Rebalanced successfully")
-        # Detect case severity
-        total_required = sum(
-            s.hours_per_week + (s.lab_hours_per_week * 2)
-            for s in data['subjects']
-        )
-        total_capacity = sum(f.max_hours_per_week for f in data['faculties'])
-
-        if total_required > 1000:
-            print(f"\n🚨 EXTREME CASE DETECTED: {total_required}h >> {total_capacity}h capacity")
-            print(f"   Activating ULTRA-AGGRESSIVE scheduling...")
-        elif total_required > 500:
-            print(f"\n⚠️ SEVERE CONSTRAINT: {total_required}h > {total_capacity}h capacity")
-            print(f"   Activating AGGRESSIVE scheduling...")
-
-        # Emergency scheduling with quality optimization
-        config = SchedulingConfig(
-        MIN_THEORY=1,
-        MIN_LAB=0,
-        REDUCTION_STEP=0.85,      # More aggressive
-        MAX_ATTEMPTS=8,           # More attempts
-        FEASIBILITY_BUFFER=1.2    # Larger buffer for extreme cases
-        )
-        emergency = EmergencyScheduler(config)
-        results = emergency.run(data, ProgressiveCPScheduler, predictor)
-        
-        # Report
-        logger.info(emergency.get_report())
-        
-        if results and results.get('statistics', {}).get('scheduled', 0) > 0:
-            write_output(results, output_dir, department_name)
-            stats = results['statistics']
-            logger.info(f"\n{'='*70}")
-            logger.info(f"✅ SUCCESS: {stats['success_rate']:.1f}%")
-            logger.info(f"   Sessions: {stats['scheduled']}/{stats['total']}")
-            logger.info(f"{'='*70}")
-            
-            return {
-                'department': department_name,
-                'success': True,
-                'stats': stats
-            }
-        else:
-            logger.error(f"❌ FAILED: Could not schedule")
-            return {
-                'department': department_name,
-                'success': False,
-                'error': 'Scheduling failed after all attempts'
-            }
-    
-    except Exception as e:
-        logger.exception(f"❌ Exception: {e}")
-        return {
-            'department': department_name,
-            'success': False,
-            'error': str(e)
-        }
-
-
 # -------------------------
 # Progressive Scheduler with Floor Priority
 # -------------------------
@@ -2439,6 +2344,7 @@ class ProgressiveCPScheduler:
             
             for subj_code in batch.subjects:
                 subject = self.subject_map.get(subj_code)
+                #print("subj_code line 2442 ",subj_code," subject",subject)
                 if subject:
                     theory_sessions += subject.hours_per_week
                     lab_sessions += subject.lab_hours_per_week
@@ -2689,9 +2595,10 @@ class ProgressiveCPScheduler:
                         'subject_code': subject.subject_code,
                         'type': 'lab',
                         'id': f"{batch.batch_id}_{subject.subject_code}{elective_mark}_L{i}",
-                        'priority': batch.priority + subject.priority,
+                        'priority': batch.priority + subject.priority + 5,  # Higher priority for labs
                         'is_elective': subject.is_elective,
-                        'elective_group': subject.elective_group
+                        'elective_group': subject.elective_group,
+                        'requires_consecutive': True  # NEW FLAG
                     })
         
         # Sort all sessions by priority (higher first)
@@ -2796,8 +2703,12 @@ class ProgressiveCPScheduler:
                     elif batch.shift_preference in ['evening', 'afternoon'] and ts.slot_id < 3:
                         continue
                     
-                    if session['type'] == 'lab' and ts.slot_id >= len(self.timeslots) - 1:
-                        continue
+                    if session['type'] == 'lab':
+                        next_slot_id = ts.slot_id + 1
+                        # Check if next slot exists and is not lunch
+                        next_slot_exists = any(t.slot_id == next_slot_id and t.slot_id != 3 for t in self.timeslots)
+                        if not next_slot_exists or ts.slot_id >= len(self.timeslots) - 1:
+                            continue  # Skip this timeslot for labs
                     
                     for room in eligible_rooms:
                         for faculty in eligible_faculty:
@@ -2834,6 +2745,43 @@ class ProgressiveCPScheduler:
                                  and any(s['id'] == k[0] and s['batch_id'] == batch.batch_id for s in sessions)]
                     if batch_vars:
                         model.AddAtMostOne(batch_vars)
+        # NEW CONSTRAINT: Lab sessions must reserve consecutive slots
+        for session in sessions:
+            if session['type'] == 'lab':
+                for day in self.working_days:
+                    for ts in self.timeslots:
+                        if ts.slot_id == 3:
+                            continue
+                        
+                        # If lab is scheduled at this slot, next slot must also be blocked
+                        session_vars_at_slot = [
+                            x[k] for k in x 
+                            if k[0] == session['id'] and k[1] == day and k[2] == ts.slot_id
+                        ]
+                        
+                        if session_vars_at_slot:
+                            next_slot_id = ts.slot_id + 1
+                            next_slot = next((t for t in self.timeslots if t.slot_id == next_slot_id), None)
+                            
+                            if next_slot and next_slot.slot_id != 3:
+                                # Block next slot for same batch/room/faculty
+                                for key in x:
+                                    if (key[0] == session['id'] and key[1] == day and key[2] == ts.slot_id):
+                                        room_id = key[3]
+                                        faculty_id = key[4]
+                                        batch_id = session['batch_id']
+                                        
+                                        # Next slot must be free for this room/faculty/batch
+                                        blocking_vars = [
+                                            x[k] for k in x 
+                                            if k[1] == day and k[2] == next_slot_id 
+                                            and (k[3] == room_id or k[4] == faculty_id or 
+                                                 any(s['id'] == k[0] and s['batch_id'] == batch_id for s in sessions))
+                                        ]
+                                        
+                                        # If lab scheduled, no other class can use room/faculty/batch in next slot
+                                        for blocking_var in blocking_vars:
+                                            model.Add(blocking_var == 0).OnlyEnforceIf(x[key])
         
         # CRITICAL: No same subject on same day for any batch
         for batch in self.batches:
@@ -3739,7 +3687,7 @@ def main():
     
     # PARALLEL PROCESSING
     use_parallel = len(excel_files) > 1
-    
+    use_parallel=False
     if use_parallel:
         print(f"\n🚀 Using PARALLEL processing ({min(4, len(excel_files))} workers)")
         
