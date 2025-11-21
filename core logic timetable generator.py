@@ -43,6 +43,46 @@ except ImportError:
 # -------------------------
 # Enhanced Data Classes with Floor Support
 # -------------------------
+
+@dataclass(frozen=True, slots=True)
+class FacultyChoice:
+    """Represents a faculty's subject preferences"""
+    faculty_id: str
+    faculty_name: str
+    choice_1: str  # Highest priority
+    choice_2: str
+    choice_3: str
+    choice_4: str
+    choice_5: str  # Lowest priority
+    
+    def get_choices_list(self) -> List[str]:
+        """Returns choices as ordered list (highest to lowest priority)"""
+        return [
+            self.choice_1, self.choice_2, self.choice_3, 
+            self.choice_4, self.choice_5
+        ]
+    
+    def get_priority_score(self, subject_code: str) -> int:
+        """
+        Returns priority score for a subject (higher = more preferred)
+        Returns 0 if subject not in choices
+        """
+        choices = self.get_choices_list()
+        try:
+            # Priority scores: Choice 1=500, 2=400, 3=300, 4=200, 5=100
+            priority_index = choices.index(subject_code)
+            return 500 - (priority_index * 100)
+        except ValueError:
+            return 0  # Subject not in choices
+
+
+@dataclass
+class AllocationConstraints:
+    """Configuration for faculty allocation mode"""
+    use_faculty_choice: bool  # True = choice-based, False = qualification-based
+    choice_weight: float = 0.7
+    qualification_weight: float = 0.3
+
 @dataclass(frozen=True, slots=True)
 class TimeSlot:
     slot_id: int
@@ -361,16 +401,114 @@ class AdvancedExcelReader:
         self.filename = filename
         self.sheets = pd.read_excel(filename, sheet_name=None, engine='openpyxl')
         print(f"✅ Loaded sheets: {list(self.sheets.keys())}")
+
+    def parse_faculty_choices(self) -> List[FacultyChoice]:
+        '''Parse faculty_choice sheet'''
+        sheet_name = self._find_sheet(['faculty_choice', 'faculty_choices', 'facultychoice', 'choices'])
+        
+        if not sheet_name:
+            print("⚠️  No 'faculty_choice' sheet found - using qualification-based allocation")
+            return []
+        
+        df = self.sheets[sheet_name]
+        print(f"\\n👤 Parsing Faculty Choices from '{sheet_name}'")
+        print(f"   Columns: {list(df.columns)}")
+        
+        faculty_choices = []
+        
+        for idx, row in df.iterrows():
+            try:
+                faculty_id = self._get_column_value(row, df, ['faculty_id', 'id', 'employee_id', 'emp_id'])
+                if not faculty_id or pd.isna(faculty_id):
+                    continue
+                faculty_id = str(faculty_id).strip()
+                
+                name = self._get_column_value(row, df, ['name', 'faculty_name', 'teacher_name'])
+                if not name:
+                    continue
+                name = str(name).strip()
+                
+                choice_1 = self._get_column_value(row, df, ['choice_1', 'choice1', 'priority_1', 'priority1'], '')
+                choice_2 = self._get_column_value(row, df, ['choice_2', 'choice2', 'priority_2', 'priority2'], '')
+                choice_3 = self._get_column_value(row, df, ['choice_3', 'choice3', 'priority_3', 'priority3'], '')
+                choice_4 = self._get_column_value(row, df, ['choice_4', 'choice4', 'priority_4', 'priority4'], '')
+                choice_5 = self._get_column_value(row, df, ['choice_5', 'choice5', 'priority_5', 'priority5'], '')
+                
+                choice_1 = str(choice_1).strip() if pd.notna(choice_1) else ''
+                choice_2 = str(choice_2).strip() if pd.notna(choice_2) else ''
+                choice_3 = str(choice_3).strip() if pd.notna(choice_3) else ''
+                choice_4 = str(choice_4).strip() if pd.notna(choice_4) else ''
+                choice_5 = str(choice_5).strip() if pd.notna(choice_5) else ''
+                
+                if not choice_1:
+                    print(f"   ⚠️  Row {idx}: {faculty_id} has no choice_1, skipping")
+                    continue
+                
+                faculty_choice = FacultyChoice(
+                    faculty_id, name, choice_1, choice_2, choice_3, choice_4, choice_5
+                )
+                faculty_choices.append(faculty_choice)
+                
+                choices = [c for c in [choice_1, choice_2, choice_3, choice_4, choice_5] if c]
+                print(f"   ✅ {faculty_id} ({name}): {', '.join(choices)}")
+                
+            except Exception as e:
+                print(f"   ⚠️  Row {idx}: {e}")
+                continue
+        
+        print(f"   ✅ Loaded {len(faculty_choices)} faculty choices")
+        return faculty_choices
+    
+    def parse_constraints(self) -> AllocationConstraints:
+        '''Parse constraints sheet'''
+        sheet_name = self._find_sheet(['constraints', 'constraint', 'config', 'configuration'])
+        
+        if not sheet_name:
+            print("⚠️  No 'constraints' sheet - using qualification-based allocation")
+            return AllocationConstraints(use_faculty_choice=False)
+        
+        df = self.sheets[sheet_name]
+        print(f"\\n⚙️  Parsing Constraints from '{sheet_name}'")
+        print(f"   Columns: {list(df.columns)}")
+        
+        name_col = self._find_column(df, ['constraint_name', 'name', 'constraint', 'setting'])
+        value_col = self._find_column(df, ['value', 'setting', 'enabled', 'status'])
+        
+        if not name_col or not value_col:
+            print(f"   ⚠️  Missing required columns")
+            return AllocationConstraints(use_faculty_choice=False)
+        
+        use_faculty_choice = False
+        
+        for idx, row in df.iterrows():
+            try:
+                name = str(row[name_col]).strip().lower()
+                value = str(row[value_col]).strip().lower()
+                
+                if name == 'faculty_choice':
+                    use_faculty_choice = value in ['yes', 'true', '1', 'y', 'on', 'enabled']
+                    status = "✅ ENABLED" if use_faculty_choice else "❌ DISABLED"
+                    print(f"   {status} faculty_choice (value: {value})")
+            except Exception as e:
+                print(f"   ⚠️  Row {idx}: {e}")
+                continue
+        
+        mode = 'CHOICE-BASED' if use_faculty_choice else 'QUALIFICATION-BASED'
+        print(f"   📋 Allocation Mode: {mode}")
+        
+        return AllocationConstraints(use_faculty_choice=use_faculty_choice)
     
     @lru_cache(maxsize=1)
     def parse_all(self):
-        """Cached parsing with header verification"""
+        '''Cached parsing with header verification'''
         return {
             'timeslots': self._parse_timeslots(),
             'rooms': self._parse_rooms(),
             'faculties': self._parse_faculties(),
             'subjects': self._parse_subjects(),
-            'batches': self._parse_batches()
+            'batches': self._parse_batches(),
+            'faculty_choices': self.parse_faculty_choices(),        # ADD THIS LINE
+            'allocation_constraints': self.parse_constraints()      # ADD THIS LINE
         }
     
     def _find_sheet(self, names: List[str]) -> Optional[str]:
@@ -806,6 +944,110 @@ class AdvancedExcelReader:
         print(f"   ✅ Loaded {len(batches)} batches")
         return batches
 
+
+class EnhancedFacultyAllocator:
+    """
+    Enhanced faculty allocation system with dual modes:
+    1. Qualification-based (existing)
+    2. Choice-based (new)
+    """
+    
+    def __init__(
+        self, 
+        faculties: List,
+        subjects: List,
+        faculty_choices: List[FacultyChoice],
+        constraints: AllocationConstraints
+    ):
+        self.faculties = faculties
+        self.subjects = subjects
+        self.faculty_choices = faculty_choices
+        self.constraints = constraints
+        
+        self.faculty_map = {f.faculty_id: f for f in faculties}
+        self.subject_map = {s.subject_code: s for s in subjects}
+        self.choice_map = {fc.faculty_id: fc for fc in faculty_choices}
+        
+        print(f"\n{'='*70}")
+        print(f"🎯 ENHANCED FACULTY ALLOCATION SYSTEM")
+        print(f"{'='*70}")
+        mode = 'CHOICE-BASED ✨' if constraints.use_faculty_choice else 'QUALIFICATION-BASED 📚'
+        print(f"   Mode: {mode}")
+        print(f"   Faculties: {len(faculties)}")
+        print(f"   Subjects: {len(subjects)}")
+        print(f"   Faculty Choices: {len(faculty_choices)}")
+        print(f"{'='*70}\n")
+    
+    def allocate_faculty_to_subject(
+        self, 
+        subject_code: str, 
+        batch_id: str
+    ) -> List[Tuple[str, int]]:
+        """
+        Allocate faculty to a subject.
+        Returns: List of (faculty_id, score) tuples, sorted by best match
+        """
+        subject = self.subject_map.get(subject_code)
+        if not subject:
+            return []
+        
+        if self.constraints.use_faculty_choice:
+            return self._allocate_by_choice(subject_code)
+        else:
+            return self._allocate_by_qualification(subject)
+    
+    def _allocate_by_choice(self, subject_code: str) -> List[Tuple[str, int]]:
+        """Allocate based on faculty choices (NEW)"""
+        allocations = []
+        
+        for faculty in self.faculties:
+            faculty_choice = self.choice_map.get(faculty.faculty_id)
+            
+            if not faculty_choice:
+                allocations.append((faculty.faculty_id, 10))
+                continue
+            
+            score = faculty_choice.get_priority_score(subject_code)
+            
+            if score > 0:
+                allocations.append((faculty.faculty_id, score))
+            else:
+                allocations.append((faculty.faculty_id, 10))
+        
+        allocations.sort(key=lambda x: x[1], reverse=True)
+        return allocations
+    
+    def _allocate_by_qualification(self, subject) -> List[Tuple[str, int]]:
+        """Allocate based on qualifications (EXISTING)"""
+        allocations = []
+        
+        for faculty in self.faculties:
+            score = self._calculate_qualification_score(subject, faculty)
+            allocations.append((faculty.faculty_id, score))
+        
+        allocations.sort(key=lambda x: x[1], reverse=True)
+        return allocations
+    
+    def _calculate_qualification_score(self, subject, faculty) -> int:
+        """Calculate match score based on qualifications"""
+        score = 100
+        
+        subject_terms = set()
+        if subject.required_specialization:
+            subject_terms.update(subject.required_specialization.lower().split())
+        subject_terms.update(subject.subject_code.lower().split())
+        subject_terms.update(subject.subject_name.lower().split())
+        
+        faculty_text = ' '.join(faculty.specializations).lower()
+        
+        for term in subject_terms:
+            if len(term) > 2 and term in faculty_text:
+                score += 500
+        
+        if any('phd' in q.lower() for q in faculty.qualifications):
+            score += 30
+        
+        return score
 
 # -------------------------
 # Smart Resource Analyzer
@@ -2300,6 +2542,11 @@ class ProgressiveCPScheduler:
         self.working_days = ["MON", "TUE", "WED", "THU", "FRI"]
         self.predictor = predictor
         
+        # NEW: Get faculty choices and constraints
+        self.faculty_choices = data.get('faculty_choices', [])
+        self.allocation_constraints = data.get('allocation_constraints', 
+                                               AllocationConstraints(use_faculty_choice=False))
+        
         self.subject_map = {s.subject_code: s for s in self.subjects}
         self.faculty_map = {f.faculty_id: f for f in self.faculties}
         self.batch_map = {b.batch_id: b for b in self.batches}
@@ -2309,10 +2556,21 @@ class ProgressiveCPScheduler:
         for room in self.rooms:
             self.rooms_by_floor_dept[room.floor][room.department].append(room)
         
-        # SMART FLOOR ASSIGNMENT: Automatically assign batches to floors
+        # NEW: Initialize enhanced faculty allocator
+        self.faculty_allocator = EnhancedFacultyAllocator(
+            faculties=self.faculties,
+            subjects=self.subjects,
+            faculty_choices=self.faculty_choices,
+            constraints=self.allocation_constraints
+        )
+        
+        # SMART FLOOR ASSIGNMENT
         self._auto_assign_floors_to_batches()
         
-        print(f"\n✨ Progressive Scheduler initialized")
+        mode_icon = "✨" if self.allocation_constraints.use_faculty_choice else "📚"
+        mode_name = "CHOICE-BASED" if self.allocation_constraints.use_faculty_choice else "QUALIFICATION-BASED"
+        
+        print(f"\\n{mode_icon} Progressive Scheduler initialized - {mode_name} faculty allocation")
         print(f"   Floors available: {sorted(set(r.floor for r in self.rooms))}")
     
     def _auto_assign_floors_to_batches(self):
@@ -2957,7 +3215,7 @@ class ProgressiveCPScheduler:
         return None
     
     def _intelligent_faculty_assignment(self, sessions):
-        """Smart faculty allocation"""
+        '''Enhanced faculty allocation using choice or qualification system'''
         batch_subject_sessions = defaultdict(list)
         for session in sessions:
             key = (session['batch_id'], session['subject_code'], session['type'])
@@ -2980,6 +3238,12 @@ class ProgressiveCPScheduler:
             reverse=True
         )
         
+        print(f"\\n{'='*70}")
+        print(f"🎯 FACULTY ALLOCATION")
+        print(f"{'='*70}")
+        mode = "CHOICE-BASED" if self.allocation_constraints.use_faculty_choice else "QUALIFICATION-BASED"
+        print(f"Mode: {mode}\\n")
+        
         for (batch_id, subject_code, sess_type), sess_list in sorted_items:
             subject = self.subject_map.get(subject_code)
             if not subject:
@@ -2987,33 +3251,50 @@ class ProgressiveCPScheduler:
             
             assignment_hours = len(sess_list) * (2 if sess_type == 'lab' else 1)
             
-            eligible = []
-            for faculty in self.faculties:
-                current_load = faculty_workload[faculty.faculty_id]
-                projected_load = current_load + assignment_hours
-                
-                if projected_load > faculty.max_hours_per_week:
+            # NEW: Use enhanced allocator
+            allocations = self.faculty_allocator.allocate_faculty_to_subject(
+                subject_code, batch_id
+            )
+            
+            if not allocations:
+                continue
+            
+            # Try top candidates in order
+            assigned = False
+            for faculty_id, score in allocations[:5]:  # Try top 5
+                faculty = self.faculty_map.get(faculty_id)
+                if not faculty:
                     continue
                 
-                match_score = self._calculate_match_score(subject, faculty)
+                current_load = faculty_workload[faculty_id]
+                projected_load = current_load + assignment_hours
                 
-                if match_score > 0:
-                    balance_score = (avg_target - projected_load) * 100
-                    final_score = match_score * 0.3 + balance_score * 0.7
+                if projected_load <= faculty.max_hours_per_week:
+                    key = (batch_id, subject_code, sess_type)
+                    faculty_assignments[key] = [faculty_id]
+                    faculty_workload[faculty_id] = projected_load
                     
-                    eligible.append({
-                        'id': faculty.faculty_id,
-                        'score': final_score,
-                        'projected_load': projected_load
-                    })
+                    # Show allocation
+                    if self.allocation_constraints.use_faculty_choice:
+                        choice_info = ""
+                        fc = self.faculty_allocator.choice_map.get(faculty_id)
+                        if fc and score > 10:
+                            try:
+                                choice_num = fc.get_choices_list().index(subject_code) + 1
+                                choice_info = f" [Choice #{choice_num}]"
+                            except ValueError:
+                                pass
+                        print(f"  ✅ {subject_code} → {faculty.name}{choice_info} (score: {score})")
+                    else:
+                        print(f"  ✅ {subject_code} → {faculty.name} (score: {score})")
+                    
+                    assigned = True
+                    break
             
-            if eligible:
-                eligible.sort(key=lambda x: x['score'], reverse=True)
-                best = eligible[0]
-                
-                key = (batch_id, subject_code, sess_type)
-                faculty_assignments[key] = [best['id']]
-                faculty_workload[best['id']] += assignment_hours
+            if not assigned:
+                print(f"  ⚠️  {subject_code}: No faculty available (all at capacity)")
+        
+        print(f"\\n{'='*70}\\n")
         
         return faculty_assignments
     
